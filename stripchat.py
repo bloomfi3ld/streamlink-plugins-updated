@@ -31,7 +31,7 @@ class Stripchat(Plugin):
     _main_js_data = None
     _doppio_js_data = None
     _pkey = None
-    _mouflon_keys = {}
+    _mouflon_keys = {"Zeechoej4aleeshi": "ubahjae7goPoodi6"}
     _cached_keys = {}
     @classmethod
     def can_handle_url(cls, url):
@@ -41,16 +41,14 @@ class Stripchat(Plugin):
     def _get_initial_data(cls):
         """Fetch static configuration and required JavaScript assets"""
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0'
         }
-        
-        # Fetch static data
+
         r = requests.get('https://stripchat.com/api/front/v3/config/static', headers=headers)
         if r.status_code != 200:
             raise Exception("Failed to fetch static data from StripChat")
         cls._static_data = r.json().get('static')
 
-        # Fetch JavaScript files
         mmp_origin = cls._static_data['features']['MMPExternalSourceOrigin']
         mmp_version = cls._static_data['featuresV2']['playerModuleExternalLoading']['mmpVersion']
         mmp_base = f"{mmp_origin}/v{mmp_version}"
@@ -60,20 +58,16 @@ class Stripchat(Plugin):
             raise Exception("Failed to fetch main.js from StripChat")
         cls._main_js_data = r.content.decode('utf-8')
 
-        # Fetch Native.js and extract stable pkey (Issue #246 workaround)
-        native_matches = re.findall('require[(]"./(Native.*?[.]js)"[)]', cls._main_js_data)
-        if native_matches:
-            native_js_name = native_matches[0]
-            r = requests.get(f"{mmp_base}/{native_js_name}", headers=headers)
-            if r.status_code == 200:
-                native_js = r.content.decode('utf-8')
-                pkey_matches = re.findall(r'pkey\s?:\s?"(.*?)"', native_js)
-                if pkey_matches:
-                    cls._pkey = pkey_matches[0]
+        doppio_idx_match = re.findall('([0-9]+):"Doppio"', cls._main_js_data)
+        if not doppio_idx_match:
+            raise Exception("Failed to locate Doppio index in main.js")
+        doppio_idx = doppio_idx_match[0]
+        doppio_hash_match = re.findall(f'{doppio_idx}:\\"([a-zA-Z0-9]{{20}})\\"', cls._main_js_data)
+        if not doppio_hash_match:
+            raise Exception("Failed to locate Doppio chunk hash in main.js")
+        doppio_hash = doppio_hash_match[0]
 
-        doppio_js_name = re.findall('require[(]"./(Doppio.*?[.]js)"[)]', cls._main_js_data)[0]
-
-        r = requests.get(f"{mmp_base}/{doppio_js_name}", headers=headers)
+        r = requests.get(f"{mmp_base}/chunk-Doppio-{doppio_hash}.js", headers=headers)
         if r.status_code != 200:
             raise Exception("Failed to fetch doppio.js from StripChat")
         cls._doppio_js_data = r.content.decode('utf-8')
@@ -206,21 +200,16 @@ class Stripchat(Plugin):
             self.logger.error("No stream name found")
             return
 
-        # Build master playlist URL, attaching psch/pkey and playlistType when pkey from Native.js is available
-        if Stripchat._pkey:
-            master_url = (
-                f"https://edge-hls.doppiocdn.com/hls/{stream_name}/master/{stream_name}_auto.m3u8"
-                f"?psch=v1&pkey={Stripchat._pkey}&playlistType=standard"
-            )
-        else:
-            master_url = f"https://edge-hls.doppiocdn.com/hls/{stream_name}/master/{stream_name}_auto.m3u8"
+        # Build master playlist URL using random doppiocdn TLD and without static pkey
+        host = 'doppiocdn.' + random.choice(['org', 'com', 'net'])
+        master_url = f"https://edge-hls.{host}/hls/{stream_name}/master/{stream_name}_auto.m3u8"
         
         try:
             # Fetch the master playlist
             master_res = self.session.http.get(master_url, headers={'Referer': self.url})
             master_content = master_res.text
             
-            # Extract Mouflon parameters
+            # Extract Mouflon parameters from master playlist
             psch, pkey = self._get_mouflon_from_m3u(master_content)
             
             # Parse variant playlist
@@ -232,49 +221,36 @@ class Stripchat(Plugin):
             
             # If Mouflon encryption is present, create custom streams
             if psch and pkey:
-                # Create a custom HTTP adapter to intercept requests
-                
                 class MouflonHTTPAdapter(HTTPAdapter):
                     def __init__(self, stripchat_instance, psch, pkey):
                         super().__init__()
                         self.stripchat = stripchat_instance
                         self.psch = psch
                         self.pkey = pkey
-                    
+
                     def send(self, request, **kwargs):
-                        # Add Mouflon params to all doppiocdn requests (any TLD)
                         if 'doppiocdn.' in request.url and 'psch=' not in request.url:
                             separator = "&" if "?" in request.url else "?"
                             request.url = f"{request.url}{separator}psch={self.psch}&pkey={self.pkey}"
-                        # Add playlistType=standard if missing
-                        if 'doppiocdn.' in request.url and 'playlistType=' not in request.url:
-                            separator = "&" if "?" in request.url else "?"
-                            request.url = f"{request.url}{separator}playlistType=standard"
-                        # Add typical headers to avoid 418 blocks
                         if 'doppiocdn.' in request.url:
                             request.headers.setdefault('Referer', self.stripchat.url)
                             request.headers.setdefault('Origin', 'https://stripchat.com')
                             request.headers.setdefault('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0')
-                        
+
                         response = super().send(request, **kwargs)
-                        
-                        # Decode content if it's an M3U8 playlist with Mouflon
+
                         content_type = (response.headers.get('content-type', '') or '').lower()
                         is_m3u8 = content_type.startswith('application/vnd.apple.mpegurl') or request.url.endswith('.m3u8')
                         if is_m3u8 and '#EXT-X-MOUFLON:' in response.text:
                             decoded_content = self.stripchat._decode_m3u8(response.text)
-                            # Mutate content in the same Response to preserve internal metadata
                             response._content = decoded_content.encode('utf-8')
-                            # Update Content-Length if present
                             if 'Content-Length' in response.headers:
                                 response.headers['Content-Length'] = str(len(response._content))
                             return response
-                        
+
                         return response
-                
-                # Install the adapter on the session
-                # Use psch=v1 and stable pkey from Native.js when available
-                adapter = MouflonHTTPAdapter(self, 'v1', Stripchat._pkey or pkey)
+
+                adapter = MouflonHTTPAdapter(self, psch, pkey)
                 # Mount on various origins used by StripChat
                 self.session.http.mount('https://edge-hls.doppiocdn.com/', adapter)
                 self.session.http.mount('https://media-hls.doppiocdn.com/', adapter)
