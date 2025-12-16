@@ -51,7 +51,7 @@ class Stripchat(Plugin):
 
         mmp_origin = cls._static_data['features']['MMPExternalSourceOrigin']
         mmp_version = cls._static_data['featuresV2']['playerModuleExternalLoading']['mmpVersion']
-        mmp_base = f"{mmp_origin}/v{mmp_version}"
+        mmp_base = f"{mmp_origin}/{mmp_version}"
 
         r = requests.get(f"{mmp_base}/main.js", headers=headers)
         if r.status_code != 200:
@@ -74,10 +74,6 @@ class Stripchat(Plugin):
     
     @classmethod
     def _get_mouflon_from_m3u(cls, m3u8_doc):
-        """Extract Mouflon info from M3U8 by scanning occurrences"""
-        def _sanitize(token: str) -> str:
-            # Server expects alphanumeric tokens; trim any trailing junk (e.g. ')')
-            return re.sub(r"[^A-Za-z0-9]+$", "", token or "")
         _start = 0
         _needle = '#EXT-X-MOUFLON:'
         while _needle in (doc := m3u8_doc[_start:]):
@@ -89,22 +85,30 @@ class Stripchat(Plugin):
                     line_end = len(m3u8_doc)
                 parts = m3u8_doc[line_start:line_end].strip().split(':')
                 if len(parts) >= 4:
-                    psch = _sanitize(parts[2])
-                    pkey = _sanitize(parts[3])
-                    return psch, pkey
+                    psch = parts[2]
+                    pkey = parts[3]
+                    pdkey = cls._get_mouflon_dec_key(pkey)
+                    if pdkey:
+                        return psch, pkey, pdkey
             _start += mouflon_start + len(_needle)
-        return None, None
+        return None, None, None
     
     @classmethod
     def _get_mouflon_dec_key(cls, pkey):
-        """Get the Mouflon decryption key"""
         if pkey in cls._mouflon_keys:
             return cls._mouflon_keys[pkey]
 
-        keys = re.findall(f'"{re.escape(pkey)}:(.*?)"', cls._doppio_js_data)
-        if keys:
-            cls._mouflon_keys[pkey] = keys[0]
-            return keys[0]
+        patterns = [
+            f'"{re.escape(pkey)}:(.*?)"',
+            f'{re.escape(pkey)}:"(.*?)"',
+            f'"{re.escape(pkey)}":"(.*?)"',
+            f'{re.escape(pkey)}:(\\w+)',
+        ]
+        for pat in patterns:
+            keys = re.findall(pat, cls._doppio_js_data)
+            if keys:
+                cls._mouflon_keys[pkey] = keys[0]
+                return keys[0]
         return None
     
     @classmethod
@@ -119,18 +123,16 @@ class Stripchat(Plugin):
     
     @classmethod
     def _decode_m3u8(cls, content):
-        """Decode M3U8 playlists with Mouflon encryption following StreamMonitor logic"""
         _mouflon_file_attr = "#EXT-X-MOUFLON:FILE:"
         _mouflon_filename = "media.mp4"
 
-        _, pkey = cls._get_mouflon_from_m3u(content)
-        if not pkey:
+        psch, pkey, pdkey = cls._get_mouflon_from_m3u(content)
+        if not pkey or not pdkey:
             return content
 
         decoded_lines = []
         lines = content.splitlines()
         last_decoded_file = None
-        pdkey = cls._get_mouflon_dec_key(pkey)
 
         for line in lines:
             if line.startswith(_mouflon_file_attr) and pdkey:
@@ -209,8 +211,7 @@ class Stripchat(Plugin):
             master_res = self.session.http.get(master_url, headers={'Referer': self.url})
             master_content = master_res.text
             
-            # Extract Mouflon parameters from master playlist
-            psch, pkey = self._get_mouflon_from_m3u(master_content)
+            psch, pkey, pdkey = self._get_mouflon_from_m3u(master_content)
             
             # Parse variant playlist
             streams = HLSStream.parse_variant_playlist(
@@ -219,7 +220,6 @@ class Stripchat(Plugin):
                 headers={'Referer': self.url}
             )
             
-            # If Mouflon encryption is present, create custom streams
             if psch and pkey:
                 class MouflonHTTPAdapter(HTTPAdapter):
                     def __init__(self, stripchat_instance, psch, pkey):
@@ -236,11 +236,17 @@ class Stripchat(Plugin):
                             request.headers.setdefault('Referer', self.stripchat.url)
                             request.headers.setdefault('Origin', 'https://stripchat.com')
                             request.headers.setdefault('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0')
+                            request.headers.setdefault('Accept', 'application/x-mpegURL,application/vnd.apple.mpegurl;q=0.9,*/*;q=0.8')
+                            request.headers.setdefault('Accept-Language', 'en-US,en;q=0.9')
 
                         response = super().send(request, **kwargs)
 
                         content_type = (response.headers.get('content-type', '') or '').lower()
-                        is_m3u8 = content_type.startswith('application/vnd.apple.mpegurl') or request.url.endswith('.m3u8')
+                        is_m3u8 = (
+                            content_type.startswith('application/vnd.apple.mpegurl')
+                            or content_type.startswith('application/x-mpegurl')
+                            or request.url.endswith('.m3u8')
+                        )
                         if is_m3u8 and '#EXT-X-MOUFLON:' in response.text:
                             decoded_content = self.stripchat._decode_m3u8(response.text)
                             response._content = decoded_content.encode('utf-8')
