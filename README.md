@@ -1,4 +1,4 @@
-# Streamlink Updated Plugins – Stripchat & Chaturbate
+# Streamlink Updated Plugins – Chaturbate
 
 This repository contains **updated Streamlink plugins** for **Chaturbate**.  
 These plugins are maintained to ensure they continue working even after the platforms release updates that break official or older versions.
