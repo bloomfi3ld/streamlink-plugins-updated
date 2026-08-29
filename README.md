@@ -9,7 +9,6 @@ These plugins are maintained to ensure they continue working even after the plat
 - Provides fixed and updated Streamlink plugins  
 - Restores functionality when websites change their APIs or streaming endpoints  
 - Allows you to continue using Streamlink to watch or record streams from:
-  - **Stripchat**
   - **Chaturbate**
 
 ---
