@@ -24,8 +24,3 @@ Clone or download this repository, then copy the plugin files (`chaturbate.py`, 
 | Windows | `%APPDATA%\streamlink\plugins` |
 | Linux | `~/.local/share/streamlink/plugins` |
 | macOS | `~/Library/Application Support/streamlink/plugins` |
-
-Windows example:
-
-```powershell
-copy plugin\stripchat.py "$env:APPDATA\streamlink\plugins\stripchat.py"
